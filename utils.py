@@ -178,7 +178,6 @@ def gen_sparse_H_poi_category(poi_category_dict, num_pois, num_categories):
 def gen_sparse_directed_H_poi(users_trajs_dict, num_pois):
     """
     构建有向 POI 转移矩阵。
-
     行表示源 POI，列表示目标 POI。
     为了延续 DCHL 风格，这里仍采用“全后续点均可视作目标”的全局转移建模方式。
     """

@@ -66,7 +66,7 @@ class HeteroHyperConvNetwork(nn.Module):
 
 
 class DirectedHyperConvLayer(nn.Module):
-    """保留 DCHL 原有风格的有向 POI 转移卷积层。"""
+    """有向 POI 转移卷积层"""
 
     def forward(self, poi_embs, hg_poi_src, hg_poi_tar):
         msg_tar = torch.sparse.mm(hg_poi_tar, poi_embs)

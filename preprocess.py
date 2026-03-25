@@ -197,7 +197,7 @@ def remap_and_split(user_sessions_raw, poi_coos_raw, poi_cat_raw, train_ratio=0.
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--raw_path", type=str, default="datasets/dataset_TSMC2014_TKY.txt")
-    parser.add_argument("--output_dir", type=str, default="datasets/TSMC2014")
+    parser.add_argument("--output_dir", type=str, default="datasets/TKY")
     parser.add_argument("--min_poi_users", type=int, default=5)
     parser.add_argument("--min_session_len", type=int, default=3)
     parser.add_argument("--min_user_sessions", type=int, default=3)
