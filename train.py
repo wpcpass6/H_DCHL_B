@@ -79,10 +79,10 @@ def evaluate(model, dataset_obj, dataloader, criterion, device, ks_list):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_dir", type=str, default="datasets/TSMC2014")
-    parser.add_argument("--meta_path", type=str, default="datasets/TSMC2014/meta.pkl")
-    parser.add_argument("--seed", type=int, default=2023)
-    parser.add_argument("--num_epochs", type=int, default=8)
+    parser.add_argument("--data_dir", type=str, default="datasets/TKY")
+    parser.add_argument("--meta_path", type=str, default="datasets/TKY/meta.pkl")
+    parser.add_argument("--seed", type=int, default=2026)
+    parser.add_argument("--num_epochs", type=int, default=50)
     parser.add_argument("--batch_size", type=int, default=200)
     parser.add_argument("--emb_dim", type=int, default=128)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -92,10 +92,13 @@ def main():
     parser.add_argument("--keep_rate", type=float, default=1.0)
     parser.add_argument("--keep_rate_poi", type=float, default=1.0)
     parser.add_argument("--num_col_layers", type=int, default=2)
-    parser.add_argument("--num_reg_layers", type=int, default=1)
+    parser.add_argument("--num_reg_layers", type=int, default=2)
     parser.add_argument("--num_cat_layers", type=int, default=1)
-    parser.add_argument("--num_trans_layers", type=int, default=3)
+    parser.add_argument("--num_trans_layers", type=int, default=4)
     parser.add_argument("--lr_scheduler_factor", type=float, default=0.1)
+    parser.add_argument("--mask_rate_cat", type=float, default=0.2)
+    parser.add_argument("--lambda_cat", type=float, default=0.05)
+    parser.add_argument("--mask_alpha", type=float, default=2.0)
     parser.add_argument("--save_dir", type=str, default="logs")
     args = parser.parse_args()
 
@@ -112,6 +115,12 @@ def main():
     os.makedirs(current_save_dir, exist_ok=True)
     build_logger(current_save_dir)
     save_json(os.path.join(current_save_dir, "args.json"), vars(args))
+    result_txt_path = os.path.join(current_save_dir, "result.txt")
+
+    def write_result_line(text):
+        """将关键信息同步写入 result.txt，便于后续人工汇总。"""
+        with open(result_txt_path, "a", encoding="utf-8") as f:
+            f.write(text + "\n")
 
     logging.info("1. Parse Arguments")
     logging.info(args)
@@ -156,6 +165,11 @@ def main():
     best_test_rec5 = 0.0
     final_results = {"Rec1": 0.0, "Rec5": 0.0, "Rec10": 0.0, "Rec20": 0.0,
                      "NDCG1": 0.0, "NDCG5": 0.0, "NDCG10": 0.0, "NDCG20": 0.0}
+    best_rec10 = -1.0
+    best_rec10_epoch = -1
+    best_rec10_row = None
+
+    write_result_line("# 每轮汇总：best-by-metric 与 best-Rec10-epoch row")
 
     for epoch in range(args.num_epochs):
         logging.info("================= Epoch %d/%d =================", epoch, args.num_epochs)
@@ -189,10 +203,31 @@ def main():
 
         for key in final_results:
             final_results[key] = max(final_results[key], test_metrics[key])
+
+        # 第二套汇报方式：按 Rec10 最优所在 epoch 汇报整行结果
+        if test_metrics["Rec10"] > best_rec10:
+            best_rec10 = test_metrics["Rec10"]
+            best_rec10_epoch = epoch
+            best_rec10_row = test_metrics.copy()
+
+        metric_text = {k: f"{v:.4f}" for k, v in final_results.items()}
+        row_text = {k: f"{v:.4f}" for k, v in best_rec10_row.items()}
+        write_result_line(
+            f"epoch={epoch}\tbest-by-metric={metric_text}\tbest-Rec10-epoch={best_rec10_epoch}\tbest-Rec10-row={row_text}"
+        )
         logging.info("==================================")
 
     logging.info("6. Final Results")
-    logging.info({k: f"{v:.4f}" for k, v in final_results.items()})
+    logging.info("best-by-metric: %s", {k: f"{v:.4f}" for k, v in final_results.items()})
+    logging.info(
+        "best-Rec10-epoch row (epoch=%d): %s",
+        best_rec10_epoch,
+        {k: f"{v:.4f}" for k, v in best_rec10_row.items()},
+    )
+    write_result_line("# Final Summary")
+    write_result_line(f"best-by-metric={ {k: f'{v:.4f}' for k, v in final_results.items()} }")
+    write_result_line(f"best-Rec10-epoch={best_rec10_epoch}")
+    write_result_line(f"best-Rec10-row={ {k: f'{v:.4f}' for k, v in best_rec10_row.items()} }")
 
 
 if __name__ == "__main__":

@@ -111,6 +111,9 @@ class HDCHLB(nn.Module):
         self.num_categories = num_categories
         self.emb_dim = args.emb_dim
         self.device = device
+        self.mask_rate_cat = args.mask_rate_cat
+        self.lambda_cat = args.lambda_cat
+        self.mask_alpha = args.mask_alpha
 
         # 四类节点的基础 embedding
         self.user_embedding = nn.Embedding(num_users, self.emb_dim)
@@ -122,6 +125,9 @@ class HDCHLB(nn.Module):
         nn.init.xavier_uniform_(self.poi_embedding.weight)
         nn.init.xavier_uniform_(self.region_embedding.weight)
         nn.init.xavier_uniform_(self.category_embedding.weight)
+
+        # Category mask token：当类别节点被遮蔽时，用可学习 token 代替原始类别嵌入
+        self.mask_category_token = nn.Parameter(torch.rand(1, self.emb_dim, device=device))
 
         # 节点自门控：延续 DCHL 的 disentangled 输入风格，但现在对应四个结构分支
         self.w_gate_col = nn.Parameter(torch.FloatTensor(self.emb_dim, self.emb_dim))
@@ -150,6 +156,44 @@ class HDCHLB(nn.Module):
         self.reg_gate = nn.Sequential(nn.Linear(args.emb_dim, 1), nn.Sigmoid())
         self.cat_gate = nn.Sequential(nn.Linear(args.emb_dim, 1), nn.Sigmoid())
 
+        # Category 重建解码器：将传播后的类别表示还原到原始类别嵌入空间
+        self.category_decoder = nn.Sequential(
+            nn.Linear(args.emb_dim, args.emb_dim),
+            nn.ELU(),
+            nn.Linear(args.emb_dim, args.emb_dim),
+        )
+
+    def apply_category_mask(self, category_embs):
+        """
+        对类别节点做随机 mask。
+
+        返回：
+        1. 被替换后的类别嵌入
+        2. 被 mask 的类别索引
+        3. 原始未扰动类别嵌入（作为重建目标）
+        """
+        original_category_embs = category_embs.clone()
+        if self.mask_rate_cat <= 0:
+            empty_idx = torch.empty(0, dtype=torch.long, device=category_embs.device)
+            return category_embs, empty_idx, original_category_embs
+
+        num_categories = category_embs.size(0)
+        num_mask = max(1, int(self.mask_rate_cat * num_categories))
+        # num_categories=5,perm = [3, 1, 4, 0, 2]随机打乱这些数字
+        perm = torch.randperm(num_categories, device=category_embs.device)
+        mask_idx = perm[:num_mask] # 取前num_mask个
+
+        masked_category_embs = category_embs.clone()
+        masked_category_embs[mask_idx] = 0.0
+        masked_category_embs[mask_idx] += self.mask_category_token
+        return masked_category_embs, mask_idx, original_category_embs
+
+    def sce_loss(self, pred_embs, target_embs):
+        """HygMap 风格的 SCE 重建损失。"""
+        pred_embs = F.normalize(pred_embs, p=2, dim=-1)
+        target_embs = F.normalize(target_embs, p=2, dim=-1)
+        return (1 - (pred_embs * target_embs).sum(dim=-1)).pow(self.mask_alpha).mean()
+
     def forward(self, dataset, batch):
         # 1) 为不同分支生成独立的输入门控 POI 表示
         base_poi_embs = self.poi_embedding.weight[:-1]
@@ -168,6 +212,13 @@ class HDCHLB(nn.Module):
 
         # 4) 类别分支：POI-Category 异构超图
         cat_edge_embs = self.category_embedding.weight
+        cat_mask_idx = torch.empty(0, dtype=torch.long, device=self.device)
+        original_cat_edge_embs = cat_edge_embs
+
+        # 只在训练阶段启用 Category mask，测试阶段保持完整类别图结构
+        if self.training and self.mask_rate_cat > 0:
+            cat_edge_embs, cat_mask_idx, original_cat_edge_embs = self.apply_category_mask(cat_edge_embs)
+
         cat_poi_out, cat_category_out = self.cat_network(cat_poi_embs, cat_edge_embs, dataset.HG_pc, dataset.HG_cp)
 
         # 5) 转移分支：保持原 DCHL 风格
@@ -210,6 +261,12 @@ class HDCHLB(nn.Module):
         # 9) 计算下一 POI 的打分
         prediction = final_user_embs @ final_poi_embs.T
 
-        # 第一版只做结构增益，不引入额外自监督项
-        aux_loss = prediction.new_tensor(0.0)
+        # Category mask 重建损失：直接监督异构类别节点表示，而不只让它充当中间容器
+        if self.training and cat_mask_idx.numel() > 0:
+            reconstructed_cat = self.category_decoder(cat_category_out[cat_mask_idx])
+            target_cat = original_cat_edge_embs[cat_mask_idx]
+            aux_loss = self.lambda_cat * self.sce_loss(reconstructed_cat, target_cat)
+        else:
+            aux_loss = prediction.new_tensor(0.0)
+
         return prediction, aux_loss
