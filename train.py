@@ -98,6 +98,8 @@ def main():
     parser.add_argument("--lr_scheduler_factor", type=float, default=0.1)
     parser.add_argument("--mask_rate_cat", type=float, default=0.2)
     parser.add_argument("--lambda_cat", type=float, default=0.05)
+    parser.add_argument("--mask_rate_reg", type=float, default=0.0)
+    parser.add_argument("--lambda_reg", type=float, default=0.0)
     parser.add_argument("--mask_alpha", type=float, default=2.0)
     parser.add_argument("--save_dir", type=str, default="logs")
     args = parser.parse_args()

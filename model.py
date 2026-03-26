@@ -113,6 +113,8 @@ class HDCHLB(nn.Module):
         self.device = device
         self.mask_rate_cat = args.mask_rate_cat
         self.lambda_cat = args.lambda_cat
+        self.mask_rate_reg = args.mask_rate_reg
+        self.lambda_reg = args.lambda_reg
         self.mask_alpha = args.mask_alpha
 
         # 四类节点的基础 embedding
@@ -128,6 +130,8 @@ class HDCHLB(nn.Module):
 
         # Category mask token：当类别节点被遮蔽时，用可学习 token 代替原始类别嵌入
         self.mask_category_token = nn.Parameter(torch.rand(1, self.emb_dim, device=device))
+        # Region mask token：当区域节点被遮蔽时，用可学习 token 代替原始区域嵌入
+        self.mask_region_token = nn.Parameter(torch.rand(1, self.emb_dim, device=device))
 
         # 节点自门控：延续 DCHL 的 disentangled 输入风格，但现在对应四个结构分支
         self.w_gate_col = nn.Parameter(torch.FloatTensor(self.emb_dim, self.emb_dim))
@@ -162,6 +166,12 @@ class HDCHLB(nn.Module):
             nn.ELU(),
             nn.Linear(args.emb_dim, args.emb_dim),
         )
+        # Region 重建解码器：将传播后的区域表示还原到原始区域嵌入空间
+        self.region_decoder = nn.Sequential(
+            nn.Linear(args.emb_dim, args.emb_dim),
+            nn.ELU(),
+            nn.Linear(args.emb_dim, args.emb_dim),
+        )
 
     def apply_category_mask(self, category_embs):
         """
@@ -188,6 +198,30 @@ class HDCHLB(nn.Module):
         masked_category_embs[mask_idx] += self.mask_category_token
         return masked_category_embs, mask_idx, original_category_embs
 
+    def apply_region_mask(self, region_embs):
+        """
+        对区域节点做随机 mask。
+
+        返回：
+        1. 被替换后的区域嵌入
+        2. 被 mask 的区域索引
+        3. 原始未扰动区域嵌入（作为重建目标）
+        """
+        original_region_embs = region_embs.clone()
+        if self.mask_rate_reg <= 0:
+            empty_idx = torch.empty(0, dtype=torch.long, device=region_embs.device)
+            return region_embs, empty_idx, original_region_embs
+
+        num_regions = region_embs.size(0)
+        num_mask = max(1, int(self.mask_rate_reg * num_regions))
+        perm = torch.randperm(num_regions, device=region_embs.device)
+        mask_idx = perm[:num_mask]
+
+        masked_region_embs = region_embs.clone()
+        masked_region_embs[mask_idx] = 0.0
+        masked_region_embs[mask_idx] += self.mask_region_token
+        return masked_region_embs, mask_idx, original_region_embs
+
     def sce_loss(self, pred_embs, target_embs):
         """HygMap 风格的 SCE 重建损失。"""
         pred_embs = F.normalize(pred_embs, p=2, dim=-1)
@@ -208,6 +242,13 @@ class HDCHLB(nn.Module):
 
         # 3) 区域分支：POI-Region 异构超图
         reg_edge_embs = self.region_embedding.weight
+        reg_mask_idx = torch.empty(0, dtype=torch.long, device=self.device)
+        original_reg_edge_embs = reg_edge_embs
+
+        # 只在训练阶段启用 Region mask，测试阶段保持完整区域图结构
+        if self.training and self.mask_rate_reg > 0:
+            reg_edge_embs, reg_mask_idx, original_reg_edge_embs = self.apply_region_mask(reg_edge_embs)
+
         reg_poi_out, reg_region_out = self.reg_network(reg_poi_embs, reg_edge_embs, dataset.HG_pr, dataset.HG_rp)
 
         # 4) 类别分支：POI-Category 异构超图
@@ -261,12 +302,17 @@ class HDCHLB(nn.Module):
         # 9) 计算下一 POI 的打分
         prediction = final_user_embs @ final_poi_embs.T
 
-        # Category mask 重建损失：直接监督异构类别节点表示，而不只让它充当中间容器
+        # Category / Region mask 重建损失：直接监督异构节点表示，而不只让它们充当中间容器
+        aux_loss = prediction.new_tensor(0.0)
+
+        if self.training and reg_mask_idx.numel() > 0:
+            reconstructed_reg = self.region_decoder(reg_region_out[reg_mask_idx])
+            target_reg = original_reg_edge_embs[reg_mask_idx]
+            aux_loss = aux_loss + self.lambda_reg * self.sce_loss(reconstructed_reg, target_reg)
+
         if self.training and cat_mask_idx.numel() > 0:
             reconstructed_cat = self.category_decoder(cat_category_out[cat_mask_idx])
             target_cat = original_cat_edge_embs[cat_mask_idx]
-            aux_loss = self.lambda_cat * self.sce_loss(reconstructed_cat, target_cat)
-        else:
-            aux_loss = prediction.new_tensor(0.0)
+            aux_loss = aux_loss + self.lambda_cat * self.sce_loss(reconstructed_cat, target_cat)
 
         return prediction, aux_loss
