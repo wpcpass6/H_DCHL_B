@@ -13,6 +13,7 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset
 
 from utils import (
+    build_poi_region_from_coos,
     csr_matrix_drop_edge,
     gen_sparse_H_poi_category,
     gen_sparse_H_poi_region,
@@ -43,12 +44,22 @@ class HDCHLBDataset(Dataset):
         self.meta = load_dict_from_pkl(f"{data_dir}/meta.pkl")
         self.pois_coos_dict = load_dict_from_pkl(f"{data_dir}/poi_coos.pkl")
         self.poi_category_dict = load_dict_from_pkl(f"{data_dir}/poi_category.pkl")
-        self.poi_region_dict = load_dict_from_pkl(f"{data_dir}/poi_region.pkl")
+
+        # Region 映射支持两种来源：
+        # 1) 显式传入 poi_region_path 时，读取已有 region 划分；
+        # 2) 否则基于 poi_coos 动态生成，可通过 region_precision 灵活切换 geohash 粒度。
+        if getattr(args, "poi_region_path", None):
+            self.poi_region_dict = load_dict_from_pkl(args.poi_region_path)
+            self.num_regions = max(self.poi_region_dict.values()) + 1 if self.poi_region_dict else 0
+        else:
+            self.poi_region_dict, self.num_regions, _ = build_poi_region_from_coos(
+                self.pois_coos_dict,
+                precision=args.region_precision,
+            )
 
         self.num_users = self.meta["num_users"]
         self.num_pois = self.meta["num_pois"]
         self.num_categories = self.meta["num_categories"]
-        self.num_regions = self.meta["num_regions"]
         self.padding_idx = self.meta["padding_idx"]
         self.keep_rate = args.keep_rate
         self.keep_rate_poi = args.keep_rate_poi

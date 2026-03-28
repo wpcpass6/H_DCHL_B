@@ -17,6 +17,9 @@ import scipy.sparse as sp
 import torch
 
 
+_GEOHASH_BASE32 = "0123456789bcdefghjkmnpqrstuvwxyz"
+
+
 def save_list_with_pkl(filename, list_obj):
     """将列表对象保存为 pickle 文件。"""
     with open(filename, "wb") as f:
@@ -45,6 +48,71 @@ def save_json(filename, obj):
     """使用标准库 json 保存配置，避免引入 yaml 依赖。"""
     with open(filename, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
+
+
+def geohash_encode(latitude, longitude, precision=6):
+    """
+    使用纯 Python 实现 geohash 编码。
+
+    这样做的好处是：
+    1. 不依赖额外三方库；
+    2. 可以在训练时灵活切换 region 粒度，而无需强依赖固定预处理产物。
+    """
+    lat_interval = [-90.0, 90.0]
+    lon_interval = [-180.0, 180.0]
+    bits = [16, 8, 4, 2, 1]
+    geohash_chars = []
+    bit = 0
+    ch = 0
+    even = True
+
+    while len(geohash_chars) < precision:
+        if even:
+            mid = (lon_interval[0] + lon_interval[1]) / 2
+            if longitude > mid:
+                ch |= bits[bit]
+                lon_interval[0] = mid
+            else:
+                lon_interval[1] = mid
+        else:
+            mid = (lat_interval[0] + lat_interval[1]) / 2
+            if latitude > mid:
+                ch |= bits[bit]
+                lat_interval[0] = mid
+            else:
+                lat_interval[1] = mid
+        even = not even
+        if bit < 4:
+            bit += 1
+        else:
+            geohash_chars.append(_GEOHASH_BASE32[ch])
+            bit = 0
+            ch = 0
+
+    return "".join(geohash_chars)
+
+
+def build_poi_region_from_coos(pois_coos_dict, precision=6):
+    """
+    根据 POI 坐标动态构造 poi->region 映射。
+
+    返回：
+    - poi_region_dict: {poi_idx: region_idx}
+    - num_regions: 区域总数
+    - geohash_to_idx: geohash 字符串到区域索引的映射
+    """
+    geohash_values = []
+    poi_geohash = {}
+    for poi_idx, coos in pois_coos_dict.items():
+        lat, lon = coos
+        gh = geohash_encode(lat, lon, precision=precision)
+        poi_geohash[poi_idx] = gh
+        geohash_values.append(gh)
+
+    unique_geohash = sorted(set(geohash_values))
+    geohash_to_idx = {gh: idx for idx, gh in enumerate(unique_geohash)}
+    poi_region_dict = {poi_idx: geohash_to_idx[gh] for poi_idx, gh in poi_geohash.items()}
+    return poi_region_dict, len(unique_geohash), geohash_to_idx
 
 
 def haversine_distance(lon1, lat1, lon2, lat2):

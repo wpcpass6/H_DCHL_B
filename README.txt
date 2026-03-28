@@ -35,3 +35,6 @@ cat_reg_mask:
 python train.py --mask_rate_cat 0.2 --lambda_cat 0.05 --mask_rate_reg 0.2 --lambda_reg 0.05 --seed 42 --save_dir logs_cat_reg_mask
 python train.py --mask_rate_cat 0.2 --lambda_cat 0.05 --mask_rate_reg 0.2 --lambda_reg 0.05 --seed 2025 --save_dir logs_cat_reg_mask
 python train.py --mask_rate_cat 0.2 --lambda_cat 0.05 --mask_rate_reg 0.2 --lambda_reg 0.05 --seed 2026 --save_dir logs_cat_reg_mask
+
+
+python train.py --mask_rate_cat 0.2 --lambda_cat 0.05 --mask_rate_reg 0.2 --lambda_reg 0.02 --region_precision 5 --seed 2026 --save_dir logs_catreg_p5

@@ -81,6 +81,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, default="datasets/TKY")
     parser.add_argument("--meta_path", type=str, default="datasets/TKY/meta.pkl")
+    parser.add_argument("--poi_region_path", type=str, default=None,
+                        help="可选：显式指定预处理好的 poi_region.pkl；若不传，则根据 poi_coos 动态按 geohash 精度生成")
+    parser.add_argument("--region_precision", type=int, default=6,
+                        help="动态构造 Region 时使用的 geohash 精度，例如 5 或 6")
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--num_epochs", type=int, default=50)
     parser.add_argument("--batch_size", type=int, default=200)
@@ -132,6 +136,7 @@ def main():
     logging.info("2. Load Dataset")
     train_dataset = HDCHLBDataset(os.path.join(args.data_dir, "train_poi_zero.pkl"), args.data_dir, args, device)
     test_dataset = HDCHLBDataset(os.path.join(args.data_dir, "test_poi_zero.pkl"), args.data_dir, args, device)
+    logging.info("dynamic num_regions used in dataset: %d", train_dataset.num_regions)
 
     logging.info("3. Construct DataLoader")
     train_dataloader = DataLoader(
@@ -151,7 +156,7 @@ def main():
     model = HDCHLB(
         num_users=meta["num_users"],
         num_pois=meta["num_pois"],
-        num_regions=meta["num_regions"],
+        num_regions=train_dataset.num_regions,
         num_categories=meta["num_categories"],
         padding_idx=meta["padding_idx"],
         args=args,

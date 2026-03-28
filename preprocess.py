@@ -180,6 +180,7 @@ def remap_and_split(user_sessions_raw, poi_coos_raw, poi_cat_raw, train_ratio=0.
         "session_gap_hours": 24,
         "min_user_sessions": min_user_sessions,
         "geohash_precision": 6,
+        # "geohash_precision": 5,
     }
 
     return (
