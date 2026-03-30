@@ -83,7 +83,7 @@ def main():
     parser.add_argument("--meta_path", type=str, default="datasets/TKY/meta.pkl")
     parser.add_argument("--poi_region_path", type=str, default=None,
                         help="可选：显式指定预处理好的 poi_region.pkl；若不传，则根据 poi_coos 动态按 geohash 精度生成")
-    parser.add_argument("--region_precision", type=int, default=6,
+    parser.add_argument("--region_precision", type=int, default=5,
                         help="动态构造 Region 时使用的 geohash 精度，例如 5 或 6")
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--num_epochs", type=int, default=50)
@@ -102,8 +102,12 @@ def main():
     parser.add_argument("--lr_scheduler_factor", type=float, default=0.1)
     parser.add_argument("--mask_rate_cat", type=float, default=0.2)
     parser.add_argument("--lambda_cat", type=float, default=0.05)
-    parser.add_argument("--mask_rate_reg", type=float, default=0.0)
-    parser.add_argument("--lambda_reg", type=float, default=0.0)
+    parser.add_argument("--mask_rate_reg", type=float, default=0.2)
+    parser.add_argument("--lambda_reg", type=float, default=0.02)
+    parser.add_argument("--lambda_cat_cls", type=float, default=0.0,
+                        help="下一类别预测多任务损失权重，设为0可关闭该辅助头")
+    parser.add_argument("--mask_rate_poi", type=float, default=0.1)
+    parser.add_argument("--lambda_poi", type=float, default=0.02)
     parser.add_argument("--mask_alpha", type=float, default=2.0)
     parser.add_argument("--save_dir", type=str, default="logs")
     args = parser.parse_args()

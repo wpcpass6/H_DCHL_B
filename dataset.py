@@ -65,6 +65,11 @@ class HDCHLBDataset(Dataset):
         self.keep_rate_poi = args.keep_rate_poi
         self.device = device
 
+        # 预先构造 poi->category 的张量索引，便于在训练时从 POI 标签快速映射到类别标签
+        self.poi_category_tensor = torch.zeros(self.num_pois, dtype=torch.long, device=device)
+        for poi_idx, cat_idx in self.poi_category_dict.items():
+            self.poi_category_tensor[poi_idx] = cat_idx
+
         # 将多 session 用户行为整理为完整轨迹，供转移分支使用
         self.users_trajs_dict, self.users_trajs_lens_dict = get_user_complete_traj(self.sessions_dict)
         self.users_rev_trajs_dict = get_user_reverse_traj(self.users_trajs_dict)
