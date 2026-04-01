@@ -56,12 +56,10 @@ def evaluate(model, dataset_obj, dataloader, criterion, device, ks_list):
 
     with torch.no_grad():
         for idx, batch in enumerate(dataloader):
-            logging.info("Test. Batch %d/%d", idx, len(dataloader))
             predictions, aux_loss = model(dataset_obj, batch)
             loss_rec = criterion(predictions, batch["label"].to(device))
             loss = loss_rec + aux_loss
             total_loss += float(loss.item())
-            logging.info("Test. loss_rec: %.4f; aux_loss: %.4f; loss: %.4f", loss_rec.item(), float(aux_loss), float(loss))
 
             for k in ks_list:
                 recall, ndcg = batch_performance(predictions.detach().cpu(), batch["label"].detach().cpu(), k)
@@ -85,9 +83,10 @@ def main():
                         help="可选：显式指定预处理好的 poi_region.pkl；若不传，则根据 poi_coos 动态按 geohash 精度生成")
     parser.add_argument("--region_precision", type=int, default=5,
                         help="动态构造 Region 时使用的 geohash 精度，例如 5 或 6")
-    parser.add_argument("--seed", type=int, default=2026)
+    parser.add_argument("--seed", type=int, default=2025)
     parser.add_argument("--num_epochs", type=int, default=50)
     parser.add_argument("--batch_size", type=int, default=200)
+    parser.add_argument("--log_interval", type=int, default=50, help="每隔多少个 batch 打印一次训练日志")
     parser.add_argument("--emb_dim", type=int, default=128)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--decay", type=float, default=5e-4)
@@ -100,16 +99,16 @@ def main():
     parser.add_argument("--num_cat_layers", type=int, default=1)
     parser.add_argument("--num_trans_layers", type=int, default=4)
     parser.add_argument("--lr_scheduler_factor", type=float, default=0.1)
-    parser.add_argument("--mask_rate_cat", type=float, default=0.2)
-    parser.add_argument("--lambda_cat", type=float, default=0.05)
-    parser.add_argument("--mask_rate_reg", type=float, default=0.2)
-    parser.add_argument("--lambda_reg", type=float, default=0.02)
+    parser.add_argument("--mask_rate_cat", type=float, default=0) #0.2
+    parser.add_argument("--lambda_cat", type=float, default=0)  #0.05
+    parser.add_argument("--mask_rate_reg", type=float, default=0) #0.2
+    parser.add_argument("--lambda_reg", type=float, default=0) #0.02
     parser.add_argument("--lambda_cat_cls", type=float, default=0.0,
                         help="下一类别预测多任务损失权重，设为0可关闭该辅助头")
-    parser.add_argument("--mask_rate_poi", type=float, default=0.1)
-    parser.add_argument("--lambda_poi", type=float, default=0.02)
-    parser.add_argument("--mask_alpha", type=float, default=2.0)
-    parser.add_argument("--save_dir", type=str, default="logs")
+    parser.add_argument("--mask_rate_poi", type=float, default=0) #0.1
+    parser.add_argument("--lambda_poi", type=float, default=0) #0.02
+    parser.add_argument("--mask_alpha", type=float, default=0) #2.0
+    parser.add_argument("--save_dir", type=str, default="logs_final")
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -138,8 +137,8 @@ def main():
     logging.info("meta: %s", meta)
 
     logging.info("2. Load Dataset")
-    train_dataset = HDCHLBDataset(os.path.join(args.data_dir, "train_poi_zero.pkl"), args.data_dir, args, device)
-    test_dataset = HDCHLBDataset(os.path.join(args.data_dir, "test_poi_zero.pkl"), args.data_dir, args, device)
+    train_dataset = HDCHLBDataset(os.path.join(args.data_dir, "train_samples.pkl"), args.data_dir, args, device)
+    test_dataset = HDCHLBDataset(os.path.join(args.data_dir, "test_samples.pkl"), args.data_dir, args, device)
     logging.info("dynamic num_regions used in dataset: %d", train_dataset.num_regions)
 
     logging.info("3. Construct DataLoader")
@@ -152,7 +151,7 @@ def main():
     test_dataloader = DataLoader(
         dataset=test_dataset,
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=False,
         collate_fn=lambda batch: collate_fn(batch, padding_value=meta["padding_idx"]),
     )
 
@@ -189,15 +188,23 @@ def main():
         train_loss = 0.0
 
         for idx, batch in enumerate(train_dataloader):
-            logging.info("Train. Batch %d/%d", idx, len(train_dataloader))
             optimizer.zero_grad()
             predictions, aux_loss = model(train_dataset, batch)
             loss_rec = criterion(predictions, batch["label"].to(device))
             loss = loss_rec + aux_loss
-            logging.info("Train. loss_rec: %.4f; aux_loss: %.4f; loss: %.4f", loss_rec.item(), float(aux_loss), float(loss))
             loss.backward()
             optimizer.step()
             train_loss += float(loss.item())
+
+            if idx % args.log_interval == 0 or idx == len(train_dataloader) - 1:
+                logging.info(
+                    "Train. Batch %d/%d loss_rec=%.4f aux_loss=%.4f loss=%.4f",
+                    idx,
+                    len(train_dataloader),
+                    loss_rec.item(),
+                    float(aux_loss),
+                    float(loss),
+                )
 
         logging.info("Training finishes at this epoch. It takes %.4f min", (time.time() - t0) / 60)
         logging.info("Training loss: %.4f", train_loss / max(len(train_dataloader), 1))

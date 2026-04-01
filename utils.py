@@ -243,19 +243,26 @@ def gen_sparse_H_poi_category(poi_category_dict, num_pois, num_categories):
     return build_binary_incidence(num_pois, num_categories, pairs)
 
 
-def gen_sparse_directed_H_poi(users_trajs_dict, num_pois):
+def gen_sparse_directed_H_poi(users_trajs_dict, num_pois, only_adjacent=False):
     """
     构建有向 POI 转移矩阵。
     行表示源 POI，列表示目标 POI。
-    为了延续 DCHL 风格，这里仍采用“全后续点均可视作目标”的全局转移建模方式。
+    参数 only_adjacent 控制两种模式：
+    1. False：延续旧版 DCHL 风格，把所有后续点都视作目标；
+    2. True：仅统计相邻转移，更符合标准 next POI 任务。
     """
     H = np.zeros((num_pois, num_pois), dtype=float)
     for _, traj in users_trajs_dict.items():
         for src_idx in range(len(traj) - 1):
-            for tar_idx in range(src_idx + 1, len(traj)):
+            if only_adjacent:
                 src_poi = traj[src_idx]
-                tar_poi = traj[tar_idx]
+                tar_poi = traj[src_idx + 1]
                 H[src_poi, tar_poi] = 1.0
+            else:
+                for tar_idx in range(src_idx + 1, len(traj)):
+                    src_poi = traj[src_idx]
+                    tar_poi = traj[tar_idx]
+                    H[src_poi, tar_poi] = 1.0
     return sp.csr_matrix(H)
 
 

@@ -271,6 +271,19 @@ class HDCHLB(nn.Module):
         target_embs = F.normalize(target_embs, p=2, dim=-1)
         return (1 - (pred_embs * target_embs).sum(dim=-1)).pow(self.mask_alpha).mean()
 
+    @staticmethod
+    def masked_mean_pooling(seq_embs, seq_mask):
+        """
+        对 prefix 序列做 masked mean pooling。
+
+        seq_embs: [B, T, d]
+        seq_mask: [B, T]
+        """
+        mask = seq_mask.unsqueeze(-1).float()
+        summed = torch.sum(seq_embs * mask, dim=1)
+        denom = torch.clamp(mask.sum(dim=1), min=1.0)
+        return summed / denom
+
     def forward(self, dataset, batch):
         # 1) 为不同分支生成独立的输入门控 POI 表示
         base_poi_embs = self.poi_embedding.weight[:-1]
@@ -313,16 +326,35 @@ class HDCHLB(nn.Module):
         # 5) 转移分支：保持原 DCHL 风格
         trans_poi_out = self.trans_network(trans_poi_embs, dataset.HG_poi_src, dataset.HG_poi_tar)
 
-        # 6) 从不同 POI 分支回聚到 User，得到用户的多分支偏好表示
-        reg_user_out = torch.sparse.mm(dataset.HG_up, reg_poi_out)
-        cat_user_out = torch.sparse.mm(dataset.HG_up, cat_poi_out)
-        trans_user_out = torch.sparse.mm(dataset.HG_up, trans_poi_out)
-
+        # 6) 标准 next POI 版本：
+        # 不再只依赖 user_idx 对应的静态用户表示，而是结合当前 prefix 序列生成样本级表示。
         batch_user_idx = batch["user_idx"]
-        col_batch_user = col_user_out[batch_user_idx]
-        reg_batch_user = reg_user_out[batch_user_idx]
-        cat_batch_user = cat_user_out[batch_user_idx]
-        trans_batch_user = trans_user_out[batch_user_idx]
+        batch_prefix = batch["user_seq"]
+        batch_prefix_mask = batch["user_seq_mask"]
+
+        # prefix 经过 padding 后会包含 padding_idx，而四个分支输出只覆盖真实 POI [0, num_pois-1]。
+        # 因此这里为每个分支补一行全零 padding 向量，避免索引越界并保证 mask pooling 正确忽略 padding 位。
+        zero_pad = torch.zeros(1, self.emb_dim, device=self.device)
+        col_poi_out_with_pad = torch.cat([col_poi_out, zero_pad], dim=0)
+        reg_poi_out_with_pad = torch.cat([reg_poi_out, zero_pad], dim=0)
+        cat_poi_out_with_pad = torch.cat([cat_poi_out, zero_pad], dim=0)
+        trans_poi_out_with_pad = torch.cat([trans_poi_out, zero_pad], dim=0)
+
+        col_prefix_embs = col_poi_out_with_pad[batch_prefix]
+        reg_prefix_embs = reg_poi_out_with_pad[batch_prefix]
+        cat_prefix_embs = cat_poi_out_with_pad[batch_prefix]
+        trans_prefix_embs = trans_poi_out_with_pad[batch_prefix]
+
+        col_prefix_user = self.masked_mean_pooling(col_prefix_embs, batch_prefix_mask)
+        reg_prefix_user = self.masked_mean_pooling(reg_prefix_embs, batch_prefix_mask)
+        cat_prefix_user = self.masked_mean_pooling(cat_prefix_embs, batch_prefix_mask)
+        trans_prefix_user = self.masked_mean_pooling(trans_prefix_embs, batch_prefix_mask)
+
+        # 协同分支额外保留用户静态节点信息，其余分支主要依赖 prefix 序列语义。
+        col_batch_user = col_user_out[batch_user_idx] + col_prefix_user
+        reg_batch_user = reg_prefix_user
+        cat_batch_user = cat_prefix_user
+        trans_batch_user = trans_prefix_user
 
         # 7) 归一化后做用户侧自适应融合
         norm_col_user = F.normalize(col_batch_user, p=2, dim=1)
