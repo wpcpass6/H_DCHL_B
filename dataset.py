@@ -74,11 +74,8 @@ class HDCHLBDataset(Dataset):
         for poi_idx, region_idx in self.poi_region_dict.items():
             self.poi_region_tensor[poi_idx] = region_idx
 
-        # 图构建只基于训练阶段用户历史，避免测试信息泄漏。
-        # 注意：协同图始终使用训练阶段的全部用户历史；
-        # 转移图则允许两种 DCHL 风格：
-        # 1) dchl_global：拼接用户训练全轨迹，可跨 session 建边；
-        # 2) dchl_intra_session：每个 session 内单独建边，不跨 session。
+       
+        # 用户轨迹相关：基于训练阶段用户历史构建全局轨迹缓存
         self.users_trajs_dict, self.users_trajs_lens_dict = get_user_complete_traj(self.train_user_sessions)
         self.users_rev_trajs_dict = get_user_reverse_traj(self.users_trajs_dict)
 
@@ -92,7 +89,7 @@ class HDCHLBDataset(Dataset):
         self.Deg_H_up = get_hyper_deg(self.H_up)
         self.HG_up = transform_csr_matrix_to_tensor(self.Deg_H_up * self.H_up).to(device)
 
-        # Region/Category 为静态属性图，允许基于全局 POI 属性构建
+        # Region  基于全局 POI 属性构建
         self.H_pr = gen_sparse_H_poi_region(self.poi_region_dict, self.num_pois, self.num_regions)
         self.Deg_H_pr = get_hyper_deg(self.H_pr)
         self.HG_pr = transform_csr_matrix_to_tensor(self.Deg_H_pr * self.H_pr).to(device)
@@ -101,6 +98,7 @@ class HDCHLBDataset(Dataset):
         self.Deg_H_rp = get_hyper_deg(self.H_rp)
         self.HG_rp = transform_csr_matrix_to_tensor(self.Deg_H_rp * self.H_rp).to(device)
 
+        # Category 基于全局 POI 属性构建
         self.H_pc = gen_sparse_H_poi_category(self.poi_category_dict, self.num_pois, self.num_categories)
         self.Deg_H_pc = get_hyper_deg(self.H_pc)
         self.HG_pc = transform_csr_matrix_to_tensor(self.Deg_H_pc * self.H_pc).to(device)
@@ -109,6 +107,9 @@ class HDCHLBDataset(Dataset):
         self.Deg_H_cp = get_hyper_deg(self.H_cp)
         self.HG_cp = transform_csr_matrix_to_tensor(self.Deg_H_cp * self.H_cp).to(device)
 
+        # 转移图则允许两种 DCHL 风格：
+        # 1) dchl_global：拼接用户训练全轨迹，可跨 session 建边；
+        # 2) dchl_intra_session：每个 session 内单独建边，不跨 session。
         if args.transition_mode == "none":
             self.H_poi_src = None
             self.Deg_H_poi_src = None

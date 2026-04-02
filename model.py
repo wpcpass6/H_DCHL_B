@@ -151,14 +151,13 @@ class HDCHLB(nn.Module):
         self.cat_network = HeteroHyperConvNetwork(args.num_cat_layers, args.emb_dim, args.dropout, device)
         self.trans_network = DirectedHyperConvNetwork(args.num_trans_layers, args.dropout)
 
-        # 用户侧自适应融合门，维持 DCHL 风格
+        # 用户侧自适应融合门
         self.col_gate = nn.Sequential(nn.Linear(args.emb_dim, 1), nn.Sigmoid())
         self.trans_gate = nn.Sequential(nn.Linear(args.emb_dim, 1), nn.Sigmoid())
         self.reg_gate = nn.Sequential(nn.Linear(args.emb_dim, 1), nn.Sigmoid())
         self.cat_gate = nn.Sequential(nn.Linear(args.emb_dim, 1), nn.Sigmoid())
 
         # 方向A：Category/Region 意图预测头
-        # 这里不再做 mask 重建，而是让 coarse-grained 意图直接进入最终决策链。
         self.category_predictor = nn.Sequential(
             nn.Linear(args.emb_dim, args.emb_dim),
             nn.ELU(),
@@ -230,24 +229,26 @@ class HDCHLB(nn.Module):
         # 6) 标准 next POI 版本：
         # 不再只依赖 user_idx 对应的静态用户表示，而是结合当前 prefix 序列生成样本级表示。
         batch_user_idx = batch["user_idx"]
-        batch_prefix = batch["user_seq"]
-        batch_prefix_mask = batch["user_seq_mask"]
+        batch_prefix = batch["user_seq"]      # [地点A, 地点B, 补零假地点, 补零假地点]
+        batch_prefix_mask = batch["user_seq_mask"] # [1, 1, 0, 0]
 
         # prefix 经过 padding 后会包含 padding_idx，而四个分支输出只覆盖真实 POI [0, num_pois-1]。
         # 因此这里为每个分支补一行全零 padding 向量，避免索引越界并保证 pooling 正确忽略 padding 位。
-        zero_pad = torch.zeros(1, self.emb_dim, device=self.device)
+        zero_pad = torch.zeros(1, self.emb_dim, device=self.device) # 凭空创造了一行全为 0 的向量
         col_poi_out_with_pad = torch.cat([col_poi_out, zero_pad], dim=0)
         reg_poi_out_with_pad = torch.cat([reg_poi_out, zero_pad], dim=0)
         cat_poi_out_with_pad = torch.cat([cat_poi_out, zero_pad], dim=0)
         if use_transition:
             trans_poi_out_with_pad = torch.cat([trans_poi_out, zero_pad], dim=0)
 
+        # 从四个分支的 POI 输出中取出 prefix 部分，做 masked mean pooling 得到 prefix 级别的用户表示。
         col_prefix_embs = col_poi_out_with_pad[batch_prefix]
         reg_prefix_embs = reg_poi_out_with_pad[batch_prefix]
         cat_prefix_embs = cat_poi_out_with_pad[batch_prefix]
         if use_transition:
             trans_prefix_embs = trans_poi_out_with_pad[batch_prefix]
 
+        # 对四个分支的 prefix_embs 做 masked mean pooling，得到样本级别的用户表示。
         col_prefix_user = self.masked_mean_pooling(col_prefix_embs, batch_prefix_mask)
         reg_prefix_user = self.masked_mean_pooling(reg_prefix_embs, batch_prefix_mask)
         cat_prefix_user = self.masked_mean_pooling(cat_prefix_embs, batch_prefix_mask)
@@ -259,6 +260,7 @@ class HDCHLB(nn.Module):
             col_batch_user = col_user_out[batch_user_idx] + col_prefix_user
         else:
             col_batch_user = None
+            
         reg_batch_user = reg_prefix_user
         cat_batch_user = cat_prefix_user
         trans_batch_user = trans_prefix_user if use_transition else None

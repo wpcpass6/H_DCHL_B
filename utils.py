@@ -144,7 +144,7 @@ def get_user_complete_traj_without_session_boundary(sessions_dict):
     将用户训练阶段的多个 session 直接拼接成完整轨迹。
 
     说明：
-    - 该函数对应原始 DCHL 风格的全轨迹转移图构建；
+    - 对应原始 DCHL 风格的全轨迹转移图构建；
     - 不区分 session 边界，因此最后一个 session 的末尾点会和下一个 session 的起点建立转移关系。
     """
     return get_user_complete_traj(sessions_dict)
@@ -256,7 +256,7 @@ def gen_sparse_H_poi_category(poi_category_dict, num_pois, num_categories):
 
 def gen_sparse_directed_H_poi_from_trajs(users_trajs_dict, num_pois):
     """
-    基于用户完整轨迹构建原始 DCHL 风格的有向 POI 转移矩阵。
+    基于轨迹构建有向 POI 转移矩阵。
 
     行表示源 POI，列表示目标 POI。
     对于轨迹中的每个点，会连接到其后续所有点。
@@ -273,9 +273,8 @@ def gen_sparse_directed_H_poi_from_trajs(users_trajs_dict, num_pois):
 
 def gen_sparse_directed_H_poi_from_sessions(user_sessions_dict, num_pois):
     """
-    基于 session 内部构建 DCHL 风格的有向 POI 转移矩阵。
+    基于 session 内部构建有向 POI 转移矩阵。
 
-    与原始 DCHL 风格保持一致：
     - 当前点连接该 session 中的后续所有点；
     - 但不会跨 session 建边。
     """
