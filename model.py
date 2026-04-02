@@ -111,14 +111,13 @@ class HDCHLB(nn.Module):
         self.num_categories = num_categories
         self.emb_dim = args.emb_dim
         self.device = device
-        self.mask_rate_cat = args.mask_rate_cat
-        self.lambda_cat = args.lambda_cat
-        self.mask_rate_reg = args.mask_rate_reg
-        self.lambda_reg = args.lambda_reg
         self.lambda_cat_cls = args.lambda_cat_cls
-        self.mask_rate_poi = args.mask_rate_poi
-        self.lambda_poi = args.lambda_poi
-        self.mask_alpha = args.mask_alpha
+        self.lambda_reg_cls = args.lambda_reg_cls
+        self.alpha_cat_prior = args.alpha_cat_prior
+        self.beta_reg_prior = args.beta_reg_prior
+        self.use_collaborative = args.use_collaborative
+        self.use_category = args.use_category
+        self.use_region = args.use_region
 
         # 四类节点的基础 embedding
         self.user_embedding = nn.Embedding(num_users, self.emb_dim)
@@ -130,13 +129,6 @@ class HDCHLB(nn.Module):
         nn.init.xavier_uniform_(self.poi_embedding.weight)
         nn.init.xavier_uniform_(self.region_embedding.weight)
         nn.init.xavier_uniform_(self.category_embedding.weight)
-
-        # POI mask token：当 POI 节点被遮蔽时，用统一的可学习 token 替代其初始表示
-        self.mask_poi_token = nn.Parameter(torch.rand(1, self.emb_dim, device=device))
-        # Category mask token：当类别节点被遮蔽时，用可学习 token 代替原始类别嵌入
-        self.mask_category_token = nn.Parameter(torch.rand(1, self.emb_dim, device=device))
-        # Region mask token：当区域节点被遮蔽时，用可学习 token 代替原始区域嵌入
-        self.mask_region_token = nn.Parameter(torch.rand(1, self.emb_dim, device=device))
 
         # 节点自门控：延续 DCHL 的 disentangled 输入风格，但现在对应四个结构分支
         self.w_gate_col = nn.Parameter(torch.FloatTensor(self.emb_dim, self.emb_dim))
@@ -165,111 +157,20 @@ class HDCHLB(nn.Module):
         self.reg_gate = nn.Sequential(nn.Linear(args.emb_dim, 1), nn.Sigmoid())
         self.cat_gate = nn.Sequential(nn.Linear(args.emb_dim, 1), nn.Sigmoid())
 
-        # Category 重建解码器：将传播后的类别表示还原到原始类别嵌入空间
-        self.category_decoder = nn.Sequential(
-            nn.Linear(args.emb_dim, args.emb_dim),
-            nn.ELU(),
-            nn.Linear(args.emb_dim, args.emb_dim),
-        )
-        # Region 重建解码器：将传播后的区域表示还原到原始区域嵌入空间
-        self.region_decoder = nn.Sequential(
-            nn.Linear(args.emb_dim, args.emb_dim),
-            nn.ELU(),
-            nn.Linear(args.emb_dim, args.emb_dim),
-        )
-        # POI 重建解码器：利用传播后的最终 POI 表示恢复被 mask 的 POI 初始表示
-        self.poi_decoder = nn.Sequential(
-            nn.Linear(args.emb_dim, args.emb_dim),
-            nn.ELU(),
-            nn.Linear(args.emb_dim, args.emb_dim),
-        )
-
-        # Category 多任务预测头：根据最终用户表示预测下一步 POI 的类别
+        # 方向A：Category/Region 意图预测头
+        # 这里不再做 mask 重建，而是让 coarse-grained 意图直接进入最终决策链。
         self.category_predictor = nn.Sequential(
             nn.Linear(args.emb_dim, args.emb_dim),
             nn.ELU(),
             nn.Linear(args.emb_dim, num_categories),
         )
-
+        self.region_predictor = nn.Sequential(
+            nn.Linear(args.emb_dim, args.emb_dim),
+            nn.ELU(),
+            nn.Linear(args.emb_dim, num_regions),
+        )
         self.category_criterion = nn.CrossEntropyLoss()
-
-    def apply_category_mask(self, category_embs):
-        """
-        对类别节点做随机 mask。
-
-        返回：
-        1. 被替换后的类别嵌入
-        2. 被 mask 的类别索引
-        3. 原始未扰动类别嵌入（作为重建目标）
-        """
-        original_category_embs = category_embs.clone()
-        if self.mask_rate_cat <= 0:
-            empty_idx = torch.empty(0, dtype=torch.long, device=category_embs.device)
-            return category_embs, empty_idx, original_category_embs
-
-        num_categories = category_embs.size(0)
-        num_mask = max(1, int(self.mask_rate_cat * num_categories))
-        # num_categories=5,perm = [3, 1, 4, 0, 2]随机打乱这些数字
-        perm = torch.randperm(num_categories, device=category_embs.device)
-        mask_idx = perm[:num_mask] # 取前num_mask个
-
-        masked_category_embs = category_embs.clone()
-        masked_category_embs[mask_idx] = 0.0
-        masked_category_embs[mask_idx] += self.mask_category_token
-        return masked_category_embs, mask_idx, original_category_embs
-
-    def apply_poi_mask(self, poi_embs):
-        """
-        对 POI 节点做随机 mask。
-
-        注意：
-        - 这里对基础 POI 嵌入进行遮蔽；
-        - 被遮蔽后的 POI 仍能通过 user/category/region/transition 四类结构从邻居恢复信息。
-        """
-        original_poi_embs = poi_embs.clone()
-        if self.mask_rate_poi <= 0:
-            empty_idx = torch.empty(0, dtype=torch.long, device=poi_embs.device)
-            return poi_embs, empty_idx, original_poi_embs
-
-        num_pois = poi_embs.size(0)
-        num_mask = max(1, int(self.mask_rate_poi * num_pois))
-        perm = torch.randperm(num_pois, device=poi_embs.device)
-        mask_idx = perm[:num_mask]
-
-        masked_poi_embs = poi_embs.clone()
-        masked_poi_embs[mask_idx] = 0.0
-        masked_poi_embs[mask_idx] += self.mask_poi_token
-        return masked_poi_embs, mask_idx, original_poi_embs
-
-    def apply_region_mask(self, region_embs):
-        """
-        对区域节点做随机 mask。
-
-        返回：
-        1. 被替换后的区域嵌入
-        2. 被 mask 的区域索引
-        3. 原始未扰动区域嵌入（作为重建目标）
-        """
-        original_region_embs = region_embs.clone()
-        if self.mask_rate_reg <= 0:
-            empty_idx = torch.empty(0, dtype=torch.long, device=region_embs.device)
-            return region_embs, empty_idx, original_region_embs
-
-        num_regions = region_embs.size(0)
-        num_mask = max(1, int(self.mask_rate_reg * num_regions))
-        perm = torch.randperm(num_regions, device=region_embs.device)
-        mask_idx = perm[:num_mask]
-
-        masked_region_embs = region_embs.clone()
-        masked_region_embs[mask_idx] = 0.0
-        masked_region_embs[mask_idx] += self.mask_region_token
-        return masked_region_embs, mask_idx, original_region_embs
-
-    def sce_loss(self, pred_embs, target_embs):
-        """HygMap 风格的 SCE 重建损失。"""
-        pred_embs = F.normalize(pred_embs, p=2, dim=-1)
-        target_embs = F.normalize(target_embs, p=2, dim=-1)
-        return (1 - (pred_embs * target_embs).sum(dim=-1)).pow(self.mask_alpha).mean()
+        self.region_criterion = nn.CrossEntropyLoss()
 
     @staticmethod
     def masked_mean_pooling(seq_embs, seq_mask):
@@ -287,10 +188,6 @@ class HDCHLB(nn.Module):
     def forward(self, dataset, batch):
         # 1) 为不同分支生成独立的输入门控 POI 表示
         base_poi_embs = self.poi_embedding.weight[:-1]
-        poi_mask_idx = torch.empty(0, dtype=torch.long, device=self.device)
-        original_poi_embs = base_poi_embs
-        if self.training and self.mask_rate_poi > 0:
-            base_poi_embs, poi_mask_idx, original_poi_embs = self.apply_poi_mask(base_poi_embs)
 
         col_poi_embs = torch.multiply(base_poi_embs, torch.sigmoid(base_poi_embs @ self.w_gate_col + self.b_gate_col))
         trans_poi_embs = torch.multiply(base_poi_embs, torch.sigmoid(base_poi_embs @ self.w_gate_trans + self.b_gate_trans))
@@ -298,33 +195,37 @@ class HDCHLB(nn.Module):
         cat_poi_embs = torch.multiply(base_poi_embs, torch.sigmoid(base_poi_embs @ self.w_gate_cat + self.b_gate_cat))
 
         # 2) 协同分支：User-POI 异构超图
-        col_edge_embs = self.user_embedding.weight
-        col_poi_out, col_user_out = self.col_network(col_poi_embs, col_edge_embs, dataset.HG_pu, dataset.HG_up)
+        # 支持 w/o U-P 消融：当关闭协同分支时，不再使用 User-POI 图传播。
+        if self.use_collaborative:
+            col_edge_embs = self.user_embedding.weight
+            col_poi_out, col_user_out = self.col_network(col_poi_embs, col_edge_embs, dataset.HG_pu, dataset.HG_up)
+        else:
+            col_poi_out = col_poi_embs
+            col_user_out = self.user_embedding.weight
 
         # 3) 区域分支：POI-Region 异构超图
-        reg_edge_embs = self.region_embedding.weight
-        reg_mask_idx = torch.empty(0, dtype=torch.long, device=self.device)
-        original_reg_edge_embs = reg_edge_embs
-
-        # 只在训练阶段启用 Region mask，测试阶段保持完整区域图结构
-        if self.training and self.mask_rate_reg > 0:
-            reg_edge_embs, reg_mask_idx, original_reg_edge_embs = self.apply_region_mask(reg_edge_embs)
-
-        reg_poi_out, reg_region_out = self.reg_network(reg_poi_embs, reg_edge_embs, dataset.HG_pr, dataset.HG_rp)
+        if self.use_region:
+            reg_edge_embs = self.region_embedding.weight
+            reg_poi_out, reg_region_out = self.reg_network(reg_poi_embs, reg_edge_embs, dataset.HG_pr, dataset.HG_rp)
+        else:
+            reg_poi_out = reg_poi_embs
+            reg_region_out = self.region_embedding.weight
 
         # 4) 类别分支：POI-Category 异构超图
-        cat_edge_embs = self.category_embedding.weight
-        cat_mask_idx = torch.empty(0, dtype=torch.long, device=self.device)
-        original_cat_edge_embs = cat_edge_embs
-
-        # 只在训练阶段启用 Category mask，测试阶段保持完整类别图结构
-        if self.training and self.mask_rate_cat > 0:
-            cat_edge_embs, cat_mask_idx, original_cat_edge_embs = self.apply_category_mask(cat_edge_embs)
-
-        cat_poi_out, cat_category_out = self.cat_network(cat_poi_embs, cat_edge_embs, dataset.HG_pc, dataset.HG_cp)
+        if self.use_category:
+            cat_edge_embs = self.category_embedding.weight
+            cat_poi_out, cat_category_out = self.cat_network(cat_poi_embs, cat_edge_embs, dataset.HG_pc, dataset.HG_cp)
+        else:
+            cat_poi_out = cat_poi_embs
+            cat_category_out = self.category_embedding.weight
 
         # 5) 转移分支：保持原 DCHL 风格
-        trans_poi_out = self.trans_network(trans_poi_embs, dataset.HG_poi_src, dataset.HG_poi_tar)
+        if dataset.HG_poi_src is not None and dataset.HG_poi_tar is not None:
+            trans_poi_out = self.trans_network(trans_poi_embs, dataset.HG_poi_src, dataset.HG_poi_tar)
+            use_transition = True
+        else:
+            trans_poi_out = None
+            use_transition = False
 
         # 6) 标准 next POI 版本：
         # 不再只依赖 user_idx 对应的静态用户表示，而是结合当前 prefix 序列生成样本级表示。
@@ -333,74 +234,100 @@ class HDCHLB(nn.Module):
         batch_prefix_mask = batch["user_seq_mask"]
 
         # prefix 经过 padding 后会包含 padding_idx，而四个分支输出只覆盖真实 POI [0, num_pois-1]。
-        # 因此这里为每个分支补一行全零 padding 向量，避免索引越界并保证 mask pooling 正确忽略 padding 位。
+        # 因此这里为每个分支补一行全零 padding 向量，避免索引越界并保证 pooling 正确忽略 padding 位。
         zero_pad = torch.zeros(1, self.emb_dim, device=self.device)
         col_poi_out_with_pad = torch.cat([col_poi_out, zero_pad], dim=0)
         reg_poi_out_with_pad = torch.cat([reg_poi_out, zero_pad], dim=0)
         cat_poi_out_with_pad = torch.cat([cat_poi_out, zero_pad], dim=0)
-        trans_poi_out_with_pad = torch.cat([trans_poi_out, zero_pad], dim=0)
+        if use_transition:
+            trans_poi_out_with_pad = torch.cat([trans_poi_out, zero_pad], dim=0)
 
         col_prefix_embs = col_poi_out_with_pad[batch_prefix]
         reg_prefix_embs = reg_poi_out_with_pad[batch_prefix]
         cat_prefix_embs = cat_poi_out_with_pad[batch_prefix]
-        trans_prefix_embs = trans_poi_out_with_pad[batch_prefix]
+        if use_transition:
+            trans_prefix_embs = trans_poi_out_with_pad[batch_prefix]
 
         col_prefix_user = self.masked_mean_pooling(col_prefix_embs, batch_prefix_mask)
         reg_prefix_user = self.masked_mean_pooling(reg_prefix_embs, batch_prefix_mask)
         cat_prefix_user = self.masked_mean_pooling(cat_prefix_embs, batch_prefix_mask)
-        trans_prefix_user = self.masked_mean_pooling(trans_prefix_embs, batch_prefix_mask)
+        if use_transition:
+            trans_prefix_user = self.masked_mean_pooling(trans_prefix_embs, batch_prefix_mask)
 
         # 协同分支额外保留用户静态节点信息，其余分支主要依赖 prefix 序列语义。
-        col_batch_user = col_user_out[batch_user_idx] + col_prefix_user
+        if self.use_collaborative:
+            col_batch_user = col_user_out[batch_user_idx] + col_prefix_user
+        else:
+            col_batch_user = None
         reg_batch_user = reg_prefix_user
         cat_batch_user = cat_prefix_user
-        trans_batch_user = trans_prefix_user
+        trans_batch_user = trans_prefix_user if use_transition else None
 
         # 7) 归一化后做用户侧自适应融合
-        norm_col_user = F.normalize(col_batch_user, p=2, dim=1)
+        if self.use_collaborative:
+            norm_col_user = F.normalize(col_batch_user, p=2, dim=1)
         norm_reg_user = F.normalize(reg_batch_user, p=2, dim=1)
         norm_cat_user = F.normalize(cat_batch_user, p=2, dim=1)
-        norm_trans_user = F.normalize(trans_batch_user, p=2, dim=1)
+        if use_transition:
+            norm_trans_user = F.normalize(trans_batch_user, p=2, dim=1)
 
-        col_coef = self.col_gate(norm_col_user)
+        if self.use_collaborative:
+            col_coef = self.col_gate(norm_col_user)
         reg_coef = self.reg_gate(norm_reg_user)
         cat_coef = self.cat_gate(norm_cat_user)
-        trans_coef = self.trans_gate(norm_trans_user)
+        if use_transition:
+            trans_coef = self.trans_gate(norm_trans_user)
 
-        final_user_embs = (
-            col_coef * norm_col_user + reg_coef * norm_reg_user + cat_coef * norm_cat_user + trans_coef * norm_trans_user
-        )
+        if not self.use_region:
+            reg_coef = torch.zeros_like(reg_coef)
+        if not self.use_category:
+            cat_coef = torch.zeros_like(cat_coef)
 
-        # 8) POI 侧基础融合：保留当前表现最稳定的四分支直接求和方式。
+        if self.use_collaborative and use_transition:
+            final_user_embs = (
+                col_coef * norm_col_user + reg_coef * norm_reg_user + cat_coef * norm_cat_user + trans_coef * norm_trans_user
+            )
+        elif self.use_collaborative and not use_transition:
+            final_user_embs = col_coef * norm_col_user + reg_coef * norm_reg_user + cat_coef * norm_cat_user
+        elif (not self.use_collaborative) and use_transition:
+            final_user_embs = reg_coef * norm_reg_user + cat_coef * norm_cat_user + trans_coef * norm_trans_user
+        else:
+            final_user_embs = reg_coef * norm_reg_user + cat_coef * norm_cat_user
+
+        # 8) POI 侧基础融合：先得到原始 POI 打分主干。
         norm_col_poi = F.normalize(col_poi_out, p=2, dim=1)
         norm_reg_poi = F.normalize(reg_poi_out, p=2, dim=1)
         norm_cat_poi = F.normalize(cat_poi_out, p=2, dim=1)
-        norm_trans_poi = F.normalize(trans_poi_out, p=2, dim=1)
-        final_poi_embs = norm_col_poi + norm_reg_poi + norm_cat_poi + norm_trans_poi
-        prediction = final_user_embs @ final_poi_embs.T
+        poi_parts = []
+        if self.use_collaborative:
+            poi_parts.append(norm_col_poi)
+        poi_parts.append(norm_reg_poi)
+        poi_parts.append(norm_cat_poi)
+        if use_transition:
+            norm_trans_poi = F.normalize(trans_poi_out, p=2, dim=1)
+            poi_parts.append(norm_trans_poi)
+        final_poi_embs = poi_parts[0]
+        for poi_part in poi_parts[1:]:
+            final_poi_embs = final_poi_embs + poi_part
+        base_prediction = final_user_embs @ final_poi_embs.T
 
-        # Category / Region mask 重建损失：直接监督异构节点表示，而不只让它们充当中间容器
+        # 方向A：先预测 coarse-grained intent（category / region），再将其作为 soft prior 注入 POI 评分。
+        category_logits = self.category_predictor(final_user_embs)  # [B, C]
+        region_logits = self.region_predictor(final_user_embs)      # [B, R]
+
+        # 将 category / region 的意图分数映射回每个候选 POI。
+        poi_cat_idx = dataset.poi_category_tensor.to(self.device)
+        poi_reg_idx = dataset.poi_region_tensor.to(self.device)
+        cat_prior_scores = category_logits[:, poi_cat_idx] if self.use_category else torch.zeros_like(base_prediction)
+        reg_prior_scores = region_logits[:, poi_reg_idx] if self.use_region else torch.zeros_like(base_prediction)
+
+        prediction = base_prediction + self.alpha_cat_prior * cat_prior_scores + self.beta_reg_prior * reg_prior_scores
+
         aux_loss = prediction.new_tensor(0.0)
-
-        if self.training and reg_mask_idx.numel() > 0:
-            reconstructed_reg = self.region_decoder(reg_region_out[reg_mask_idx])
-            target_reg = original_reg_edge_embs[reg_mask_idx]
-            aux_loss = aux_loss + self.lambda_reg * self.sce_loss(reconstructed_reg, target_reg)
-
-        if self.training and cat_mask_idx.numel() > 0:
-            reconstructed_cat = self.category_decoder(cat_category_out[cat_mask_idx])
-            target_cat = original_cat_edge_embs[cat_mask_idx]
-            aux_loss = aux_loss + self.lambda_cat * self.sce_loss(reconstructed_cat, target_cat)
-
-        if self.training and poi_mask_idx.numel() > 0:
-            reconstructed_poi = self.poi_decoder(final_poi_embs[poi_mask_idx])
-            target_poi = original_poi_embs[poi_mask_idx]
-            aux_loss = aux_loss + self.lambda_poi * self.sce_loss(reconstructed_poi, target_poi)
-
-        # Category 多任务分类损失：显式让最终用户表示学习“下一步属于什么类别”
-        if self.training and self.lambda_cat_cls > 0:
-            category_logits = self.category_predictor(final_user_embs)
-            category_labels = dataset.poi_category_tensor[batch["label"]]
-            aux_loss = aux_loss + self.lambda_cat_cls * self.category_criterion(category_logits, category_labels)
+        if self.training:
+            if self.use_category and self.lambda_cat_cls > 0:
+                aux_loss = aux_loss + self.lambda_cat_cls * self.category_criterion(category_logits, batch["label_category"])
+            if self.use_region and self.lambda_reg_cls > 0:
+                aux_loss = aux_loss + self.lambda_reg_cls * self.region_criterion(region_logits, batch["label_region"])
 
         return prediction, aux_loss

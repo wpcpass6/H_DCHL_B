@@ -18,10 +18,12 @@ from utils import (
     gen_sparse_H_poi_category,
     gen_sparse_H_poi_region,
     gen_sparse_H_user,
-    gen_sparse_directed_H_poi,
+    gen_sparse_directed_H_poi_from_trajs,
+    gen_sparse_directed_H_poi_from_sessions,
     get_all_users_seqs,
     get_hyper_deg,
     get_user_complete_traj,
+    get_user_complete_traj_without_session_boundary,
     get_user_reverse_traj,
     load_dict_from_pkl,
     load_list_with_pkl,
@@ -72,7 +74,11 @@ class HDCHLBDataset(Dataset):
         for poi_idx, region_idx in self.poi_region_dict.items():
             self.poi_region_tensor[poi_idx] = region_idx
 
-        # 图构建只基于训练阶段用户历史，避免测试信息泄漏
+        # 图构建只基于训练阶段用户历史，避免测试信息泄漏。
+        # 注意：协同图始终使用训练阶段的全部用户历史；
+        # 转移图则允许两种 DCHL 风格：
+        # 1) dchl_global：拼接用户训练全轨迹，可跨 session 建边；
+        # 2) dchl_intra_session：每个 session 内单独建边，不跨 session。
         self.users_trajs_dict, self.users_trajs_lens_dict = get_user_complete_traj(self.train_user_sessions)
         self.users_rev_trajs_dict = get_user_reverse_traj(self.users_trajs_dict)
 
@@ -103,15 +109,29 @@ class HDCHLBDataset(Dataset):
         self.Deg_H_cp = get_hyper_deg(self.H_cp)
         self.HG_cp = transform_csr_matrix_to_tensor(self.Deg_H_cp * self.H_cp).to(device)
 
-        # 转移图只基于训练行为构建，且采用相邻 POI 转移更符合标准 next POI 任务
-        self.H_poi_src = gen_sparse_directed_H_poi(self.users_trajs_dict, self.num_pois, only_adjacent=True)
-        self.H_poi_src = csr_matrix_drop_edge(self.H_poi_src, self.keep_rate_poi)
-        self.Deg_H_poi_src = get_hyper_deg(self.H_poi_src)
-        self.HG_poi_src = transform_csr_matrix_to_tensor(self.Deg_H_poi_src * self.H_poi_src).to(device)
+        if args.transition_mode == "none":
+            self.H_poi_src = None
+            self.Deg_H_poi_src = None
+            self.HG_poi_src = None
+            self.H_poi_tar = None
+            self.Deg_H_poi_tar = None
+            self.HG_poi_tar = None
+        else:
+            if args.transition_mode == "dchl_global":
+                trans_users_trajs_dict, _ = get_user_complete_traj_without_session_boundary(self.train_user_sessions)
+                self.H_poi_src = gen_sparse_directed_H_poi_from_trajs(trans_users_trajs_dict, self.num_pois)
+            elif args.transition_mode == "dchl_intra_session":
+                self.H_poi_src = gen_sparse_directed_H_poi_from_sessions(self.train_user_sessions, self.num_pois)
+            else:
+                raise ValueError(f"Unsupported transition_mode: {args.transition_mode}")
 
-        self.H_poi_tar = self.H_poi_src.T
-        self.Deg_H_poi_tar = get_hyper_deg(self.H_poi_tar)
-        self.HG_poi_tar = transform_csr_matrix_to_tensor(self.Deg_H_poi_tar * self.H_poi_tar).to(device)
+            self.H_poi_src = csr_matrix_drop_edge(self.H_poi_src, self.keep_rate_poi)
+            self.Deg_H_poi_src = get_hyper_deg(self.H_poi_src)
+            self.HG_poi_src = transform_csr_matrix_to_tensor(self.Deg_H_poi_src * self.H_poi_src).to(device)
+
+            self.H_poi_tar = self.H_poi_src.T
+            self.Deg_H_poi_tar = get_hyper_deg(self.H_poi_tar)
+            self.HG_poi_tar = transform_csr_matrix_to_tensor(self.Deg_H_poi_tar * self.H_poi_tar).to(device)
 
         self.all_train_sessions = get_all_users_seqs(self.users_trajs_dict)
         self.pad_all_train_sessions = pad_sequence(

@@ -83,8 +83,14 @@ def main():
                         help="可选：显式指定预处理好的 poi_region.pkl；若不传，则根据 poi_coos 动态按 geohash 精度生成")
     parser.add_argument("--region_precision", type=int, default=5,
                         help="动态构造 Region 时使用的 geohash 精度，例如 5 或 6")
+    parser.add_argument("--transition_mode", type=str, default="dchl_global",
+                        choices=["none", "dchl_global", "dchl_intra_session"],
+                        help="转移图构建方式：none 为去掉转移分支，dchl_global 为用户训练全轨迹建图，dchl_intra_session 为仅在 session 内建图")
+    parser.add_argument("--use_collaborative", type=int, default=1, help="是否使用 User-POI 协同分支，1 开启，0 关闭")
+    parser.add_argument("--use_category", type=int, default=1, help="是否使用 Category 分支，1 开启，0 关闭")
+    parser.add_argument("--use_region", type=int, default=1, help="是否使用 Region 分支，1 开启，0 关闭")
     parser.add_argument("--seed", type=int, default=2025)
-    parser.add_argument("--num_epochs", type=int, default=50)
+    parser.add_argument("--num_epochs", type=int, default=1)
     parser.add_argument("--batch_size", type=int, default=200)
     parser.add_argument("--log_interval", type=int, default=50, help="每隔多少个 batch 打印一次训练日志")
     parser.add_argument("--emb_dim", type=int, default=128)
@@ -99,17 +105,19 @@ def main():
     parser.add_argument("--num_cat_layers", type=int, default=1)
     parser.add_argument("--num_trans_layers", type=int, default=4)
     parser.add_argument("--lr_scheduler_factor", type=float, default=0.1)
-    parser.add_argument("--mask_rate_cat", type=float, default=0) #0.2
-    parser.add_argument("--lambda_cat", type=float, default=0)  #0.05
-    parser.add_argument("--mask_rate_reg", type=float, default=0) #0.2
-    parser.add_argument("--lambda_reg", type=float, default=0) #0.02
-    parser.add_argument("--lambda_cat_cls", type=float, default=0.0,
-                        help="下一类别预测多任务损失权重，设为0可关闭该辅助头")
-    parser.add_argument("--mask_rate_poi", type=float, default=0) #0.1
-    parser.add_argument("--lambda_poi", type=float, default=0) #0.02
-    parser.add_argument("--mask_alpha", type=float, default=0) #2.0
+    parser.add_argument("--lambda_cat_cls", type=float, default=0.05,
+                        help="Category 意图预测损失权重")
+    parser.add_argument("--lambda_reg_cls", type=float, default=0.02,
+                        help="Region 意图预测损失权重")
+    parser.add_argument("--alpha_cat_prior", type=float, default=0.10,
+                        help="Category soft prior 注入 POI 打分的强度")
+    parser.add_argument("--beta_reg_prior", type=float, default=0.05,
+                        help="Region soft prior 注入 POI 打分的强度")
     parser.add_argument("--save_dir", type=str, default="logs_final")
     args = parser.parse_args()
+    args.use_collaborative = bool(args.use_collaborative)
+    args.use_category = bool(args.use_category)
+    args.use_region = bool(args.use_region)
 
     random.seed(args.seed)
     np.random.seed(args.seed)
